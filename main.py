@@ -1,4 +1,6 @@
 import sys
+import math
+import random
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene,
@@ -10,95 +12,125 @@ from PySide6.QtCore import Qt, QPointF
 
 def _area2(a: QPointF, b: QPointF, c: QPointF) -> float:
     """Twice the signed area of triangle ABC."""
-    return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x())
+    return (b.x()-a.x())*(c.y()-a.y()) - (b.y()-a.y())*(c.x()-a.x())
 
 
-def _is_convex(a: QPointF, b: QPointF, c: QPointF) -> bool:
-    """True if angle ABC is convex assuming CCW winding."""
-    return _area2(a, b, c) > 0
-
-
-def _point_in_triangle(p: QPointF, a: QPointF, b: QPointF, c: QPointF) -> bool:
-    """Barycentric / area‐sum test."""
-    A = abs(_area2(a, b, c))
-    A1 = abs(_area2(p, b, c))
-    A2 = abs(_area2(a, p, c))
-    A3 = abs(_area2(a, b, p))
-    return abs((A1 + A2 + A3) - A) < 1e-6
-
-
-def ear_clip(vertices: list[QPointF]) -> list[tuple[QPointF, QPointF, QPointF]]:
-    """
-    Simple ear‐clipping triangulation.
-    Returns a list of triangles (each a 3-tuple of QPointF) covering the polygon.
-    """
+def ear_clip(vertices: list[QPointF]) -> list[tuple[QPointF,QPointF,QPointF]]:
+    """Simple ear-clipping triangulation (CCW)."""
     pts = vertices.copy()
-    n = len(pts)
-    if n < 3:
-        return []
-
-    # ensure CCW winding
-    area_sum = 0.0
-    for i in range(n):
-        j = (i + 1) % n
-        area_sum += pts[i].x() * pts[j].y() - pts[j].x() * pts[i].y()
+    # ensure CCW
+    area_sum = sum(pts[i].x()*pts[(i+1)%len(pts)].y()
+                   - pts[(i+1)%len(pts)].x()*pts[i].y()
+                   for i in range(len(pts)))
     if area_sum < 0:
         pts.reverse()
 
-    result: list[tuple[QPointF, QPointF, QPointF]] = []
-    V = pts.copy()
-    while len(V) > 3:
-        ear_found = False
-        for i in range(len(V)):
-            prev = V[(i - 1) % len(V)]
-            curr = V[i]
-            nxt = V[(i + 1) % len(V)]
-            if not _is_convex(prev, curr, nxt):
-                continue
-            # check no other vertex lies inside this triangle
-            if any(
-                p is not prev and p is not curr and p is not nxt
-                and _point_in_triangle(p, prev, curr, nxt)
-                for p in V
-            ):
-                continue
-            # found an ear
-            result.append((prev, curr, nxt))
-            del V[i]
-            ear_found = True
-            break
-        if not ear_found:
-            # polygon might be self‐intersecting or degenerate
-            break
+    def is_convex(a,b,c):
+        return _area2(a,b,c) > 0
 
-    # the final remaining triangle
-    if len(V) == 3:
-        result.append((V[0], V[1], V[2]))
+    def point_in_tri(p,a,b,c):
+        A = abs(_area2(a,b,c))
+        A1 = abs(_area2(p,b,c))
+        A2 = abs(_area2(a,p,c))
+        A3 = abs(_area2(a,b,p))
+        return abs((A1+A2+A3)-A) < 1e-6
+
+    V = pts.copy()
+    result = []
+    while len(V) > 3:
+        for i in range(len(V)):
+            prev, curr, nxt = V[i-1], V[i], V[(i+1)%len(V)]
+            if not is_convex(prev,curr,nxt):
+                continue
+            if any(p not in (prev, curr, nxt) and point_in_tri(p,prev,curr,nxt)
+                   for p in V):
+                continue
+            result.append((prev,curr,nxt))
+            del V[i]
+            break
+        else:
+            # no ear found → stop
+            break
+    if len(V)==3:
+        result.append((V[0],V[1],V[2]))
     return result
 
 
+def unique_points(pts: list[QPointF]) -> list[QPointF]:
+    """Return a list of points without duplicates (exact match)."""
+    unique = []
+    for p in pts:
+        if not any(p.x()==q.x() and p.y()==q.y() for q in unique):
+            unique.append(p)
+    return unique
+
+
+def merge_convex(polygons: list[list[QPointF]]) -> list[list[QPointF]]:
+    """
+    Greedily merge any two polygons sharing an edge if their union is convex.
+    """
+    merged = True
+    while merged:
+        merged = False
+        n = len(polygons)
+        for i in range(n):
+            for j in range(i+1, n):
+                P, Q = polygons[i], polygons[j]
+                # find shared edge endpoints
+                shared = [p for p in P if any(p.x()==q.x() and p.y()==q.y() for q in Q)]
+                if len(shared) != 2:
+                    continue
+                # union of vertices
+                all_pts = unique_points(P + Q)
+                # compute centroid
+                cx = sum(p.x() for p in all_pts)/len(all_pts)
+                cy = sum(p.y() for p in all_pts)/len(all_pts)
+                # sort CCW around centroid
+                all_pts.sort(key=lambda p: math.atan2(p.y()-cy, p.x()-cx))
+                # test convexity
+                is_conv = True
+                m = len(all_pts)
+                for k in range(m):
+                    a,b,c = all_pts[k-1], all_pts[k], all_pts[(k+1)%m]
+                    if _area2(a,b,c) <= 0:
+                        is_conv = False
+                        break
+                if not is_conv:
+                    continue
+                # perform merge
+                new_poly = all_pts
+                # remove the two old polygons (pop higher index first)
+                polygons.pop(j)
+                polygons.pop(i)
+                polygons.append(new_poly)
+                merged = True
+                break
+            if merged:
+                break
+    return polygons
+
+
 class GraphicsView(QGraphicsView):
-    def __init__(self, scene: QGraphicsScene):
+    def __init__(self, scene):
         super().__init__(scene)
         self.setRenderHint(QPainter.Antialiasing)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.setAlignment(Qt.AlignLeft|Qt.AlignTop)
 
     def wheelEvent(self, ev):
         if ev.modifiers() & Qt.ControlModifier:
-            factor = 1.25 if ev.angleDelta().y() > 0 else 0.8
-            self.scale(factor, factor)
+            f = 1.25 if ev.angleDelta().y()>0 else 0.8
+            self.scale(f,f)
         else:
             super().wheelEvent(ev)
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
             pt = ev.position().toPoint()
-            scene_pt = self.mapToScene(pt)
-            self.window().add_point(scene_pt)
+            self.window().add_point(self.mapToScene(pt))
         else:
             super().mousePressEvent(ev)
 
@@ -106,84 +138,71 @@ class GraphicsView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Convex‐Decomposition Drawer")
-        self.resize(800, 600)
+        self.setWindowTitle("Largest Convex Decomposition")
+        self.resize(800,600)
 
-        # Scene & View
         self.scene = QGraphicsScene(self)
         self.view = GraphicsView(self.scene)
         self.setCentralWidget(self.view)
 
-        # State
-        self.current_points: list[QPointF] = []
-        self.last_polygon_points: list[QPointF] = []
-        self.outline_pen = QPen(QColor("#0066CC"), 2)
+        self.current = []         # points being drawn
+        self.last_closed = []     # last closed polygon
+        self.out_pen = QPen(QColor("#0066CC"),2)
 
-        # Toolbar
-        tb = self.addToolBar("Tools")
+        tb = QToolBar()
         tb.setMovable(False)
+        self.addToolBar(tb)
 
         btn_close = QPushButton("Close Shape")
         btn_close.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         btn_close.clicked.connect(self.close_shape)
         tb.addWidget(btn_close)
 
-        btn_split = QPushButton("Split into Convex Parts")
+        btn_split = QPushButton("Split into Largest Convex Shapes")
         btn_split.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        btn_split.clicked.connect(self.decompose_shape)
+        btn_split.clicked.connect(self.decompose)
         tb.addWidget(btn_split)
 
-    def add_point(self, pos: QPointF):
-        print(f"Added point ({pos.x():.1f}, {pos.y():.1f})")
-        r = 4
-        self.scene.addEllipse(
-            pos.x() - r, pos.y() - r, r * 2, r * 2,
-            QPen(Qt.NoPen), QBrush(QColor("#CC0000"))
-        )
-        if self.current_points:
-            prev = self.current_points[-1]
-            self.scene.addLine(prev.x(), prev.y(), pos.x(), pos.y(), self.outline_pen)
-        self.current_points.append(pos)
+    def add_point(self, p: QPointF):
+        # add a vertex
+        self.scene.addEllipse(p.x()-4, p.y()-4, 8, 8,
+                              QPen(Qt.NoPen), QBrush(QColor("#CC0000")))
+        if self.current:
+            prev = self.current[-1]
+            self.scene.addLine(prev.x(), prev.y(), p.x(), p.y(), self.out_pen)
+        self.current.append(p)
 
     def close_shape(self):
-        if len(self.current_points) < 3:
-            print("Need ≥3 points to close.")
+        if len(self.current) < 3:
             return
-        print("Shape closed.")
-        first = self.current_points[0]
-        last = self.current_points[-1]
-        self.scene.addLine(last.x(), last.y(), first.x(), first.y(), self.outline_pen)
-        # store and reset
-        self.last_polygon_points = self.current_points.copy()
-        self.current_points.clear()
+        first, last = self.current[0], self.current[-1]
+        self.scene.addLine(last.x(), last.y(), first.x(), first.y(), self.out_pen)
+        self.last_closed = self.current.copy()
+        self.current.clear()
 
-    def decompose_shape(self):
-        if not self.last_polygon_points:
-            print("Draw and close a shape first.")
+    def decompose(self):
+        if not self.last_closed:
             return
-        print("Decomposing into convex parts…")
-        tris = ear_clip(self.last_polygon_points)
-        print(f"  Produced {len(tris)} triangles.")
-
-        # redraw: clear everything
+        # 1) triangulate
+        tris = ear_clip(self.last_closed)
+        polys = [list(tri) for tri in tris]
+        # 2) merge greedily
+        merged = merge_convex(polys)
+        # 3) redraw everything
         self.scene.clear()
-
-        # 1) draw original outline
-        n = len(self.last_polygon_points)
+        # outline
+        n = len(self.last_closed)
         for i in range(n):
-            p1 = self.last_polygon_points[i]
-            p2 = self.last_polygon_points[(i + 1) % n]
-            self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), self.outline_pen)
-
-        # 2) overlay each triangle
-        for idx, (a, b, c) in enumerate(tris):
-            poly = QPolygonF([a, b, c])
-            color = QColor.fromHsv(int(360 * idx / len(tris)), 200, 200, 120)
-            pen = QPen(color.darker(), 1)
+            a = self.last_closed[i]
+            b = self.last_closed[(i+1)%n]
+            self.scene.addLine(a.x(), a.y(), b.x(), b.y(), self.out_pen)
+        # draw merged pieces
+        for idx, poly in enumerate(merged):
+            qpoly = QPolygonF(poly)
+            color = QColor.fromHsv(int(360*idx/len(merged)), 200,200,120)
+            pen   = QPen(color.darker(),1)
             brush = QBrush(color)
-            self.scene.addPolygon(poly, pen, brush)
-
-    # no scene‐rect locking or fitInView: you can zoom in/out with Ctrl + wheel
+            self.scene.addPolygon(qpoly, pen, brush)
 
 
 if __name__ == "__main__":
@@ -191,3 +210,4 @@ if __name__ == "__main__":
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
+
